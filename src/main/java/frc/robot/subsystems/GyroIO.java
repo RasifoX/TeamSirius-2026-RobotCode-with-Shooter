@@ -2,12 +2,21 @@ package frc.robot.subsystems;
 
 import edu.wpi.first.math.geometry.Rotation2d;
 
+/**
+ * GYRO ARAYÜZÜ (Strateji Deseni)
+ *
+ * DriveSubsystem gyronun fiziksel tipini bilmez.
+ * Sadece bu üç metodu çağırır.
+ * Pigeon ↔ NavX geçişi için sadece DriveConstants.kUseNavX değiştirilir.
+ */
 public interface GyroIO {
-    double getYaw();
 
-    Rotation2d getRotation2d();
+  /** Robotun sahaya göre açısını Rotation2d olarak döndürür. CCW pozitif. */
+  Rotation2d getRotation2d();
 
-    boolean isConnected();
+  /** Gyro'yu sıfırlar (o an baktığı yön = 0°). */
+  void reset();
 
-    void reset();
+  /** Gyro'nun bağlı ve veri üretiyor olduğunu kontrol eder. */
+  boolean isConnected();
 }

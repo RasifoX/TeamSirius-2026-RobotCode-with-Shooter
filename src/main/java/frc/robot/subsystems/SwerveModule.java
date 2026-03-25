@@ -2,8 +2,6 @@ package frc.robot.subsystems;
 
 import com.ctre.phoenix6.hardware.CANcoder;
 import com.revrobotics.spark.SparkMax;
-import com.revrobotics.spark.ResetMode; // Yeni yerleri burası
-import com.revrobotics.spark.PersistMode;
 import com.revrobotics.spark.SparkLowLevel.MotorType;
 import com.revrobotics.spark.SparkBase.PersistMode;
 import com.revrobotics.spark.SparkBase.ResetMode;
@@ -21,193 +19,233 @@ import frc.robot.Constants.DriveConstants;
 
 /**
  * SWERVE MODULE - ROBOTUN KAS HÜCRESİ
- * * Bu sınıf tek bir tekerlek modülünü temsil eder (Örn: Sol Ön).
- * * İçinde 2 Motor (Sürüş + Dönüş) ve 3 Encoder (Sürüş + Dönüş + CANcoder)
- * vardır.
- * * REV 2026 API'si ile tamamen optimize edilmiştir.
+ *
+ * Tek bir tekerlek modülünü temsil eder.
+ * 2 Motor (Drive + Steer) + CANcoder içerir.
+ *
+ * ─── OFFSET MATEMATİĞİ ───────────────────────────────────────────────────────
+ *  CANcoder → Phoenix 6 → getAbsolutePosition() → ROTASYON birimi (-0.5 … 0.5)
+ *
+ *  resetToAbsolute() formülü:
+ *    encoderRad = (cancoderRotations - offsetRotations) * 2π
+ *
+ *  Bu formül, tekerlek fiziksel olarak ileri bakarken encoder'ı 0 rad'a ayarlar.
+ *  Sonuç [-π, π] aralığına normalize edilir → wrapping range ile uyumlu.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 public class SwerveModule {
-  // DONANIM NESNELERİ
+
+  // Donanım
   private final SparkMax m_driveMotor;
   private final SparkMax m_turningMotor;
 
-  private final RelativeEncoder m_driveEncoder;
-  private final RelativeEncoder m_turningEncoder;
-
-  private final SparkClosedLoopController m_turningPIDController; // Yeni PID Kontrolcüsü
+  private final RelativeEncoder            m_driveEncoder;
+  private final RelativeEncoder            m_turningEncoder;
+  private final SparkClosedLoopController  m_turningPIDController;
 
   private final CANcoder m_turningCanCoder;
-  private final double m_chassisAngularOffset; // Magnet ofseti (Kalibrasyon)
+
+  // Offset: Tuner X'ten okunan ROTASYON değeri (0.0 – 1.0 arası, negatif olabilir)
+  private final double m_chassisAngularOffsetRotations;
 
   /**
-   * Modül Kurucusu (Constructor)
-   * 
-   * @param driveMotorId         Sürüş Motoru CAN ID
-   * @param turningMotorId       Dönüş Motoru CAN ID
-   * @param canCoderId           CANcoder ID
-   * @param chassisAngularOffset Tekerleğin düz durması için gereken açı farkı
+   * @param driveMotorId    Sürüş Motoru CAN ID
+   * @param turningMotorId  Dönüş Motoru CAN ID
+   * @param canCoderId      CANcoder CAN ID
+   * @param driveInverted   Sürüş motoru ters mi? (MK4i'de sağ modüller genellikle true)
+   * @param steerInverted   Dönüş motoru ters mi? (genellikle false)
+   * @param offsetRotations Tekerlek ileri bakarkenn CANcoder'ın rotasyon değeri
+   *                        (Tuner X'ten direkt oku, eksi yapma, dereceye çevirme)
    */
-  @SuppressWarnings("removal") // REV'in eski uyarılarını gizle
-  public SwerveModule(int driveMotorId, int turningMotorId, int canCoderId, double chassisAngularOffset) {
-    m_chassisAngularOffset = chassisAngularOffset;
+  @SuppressWarnings("removal")
+  public SwerveModule(
+      int driveMotorId,
+      int turningMotorId,
+      int canCoderId,
+      boolean driveInverted,
+      boolean steerInverted,
+      double offsetRotations) {
 
-    // 1. MOTORLARI YARAT (Fırçasız NEO Motorlar)
-    m_driveMotor = new SparkMax(driveMotorId, MotorType.kBrushless);
+    m_chassisAngularOffsetRotations = offsetRotations;
+
+    // ── Motorlar ──────────────────────────────────────────────────────────────
+    m_driveMotor   = new SparkMax(driveMotorId,   MotorType.kBrushless);
     m_turningMotor = new SparkMax(turningMotorId, MotorType.kBrushless);
 
-    // 2. SENSÖRLERİ TANI
+    // ── CANcoder ──────────────────────────────────────────────────────────────
     m_turningCanCoder = new CANcoder(canCoderId);
 
-    // -------------------------------------------------------------------------
-    // SÜRÜŞ MOTORU KONFİGÜRASYONU (Drive Motor Config)
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // SÜRÜŞ MOTORU KONFİGÜRASYONU
+    // =========================================================================
     SparkMaxConfig driveConfig = new SparkMaxConfig();
 
-    // Fren Modu: Robot durunca tekerlekler kilitlensin (Kaymasın)
     driveConfig.idleMode(IdleMode.kBrake);
-
-    // Voltaj Dengeleme: Pil düşse bile performans sabit kalsın (12V referans)
+    driveConfig.inverted(driveInverted);
     driveConfig.voltageCompensation(ModuleConstants.kNominalVoltage);
-
-    // Akım Sınırı: Motoru yakmamak için amper limiti (Constants'tan gelir)
     driveConfig.smartCurrentLimit(ModuleConstants.kDriveCurrentLimit);
 
-    // Encoder Çevirimi: Motor devrini "Metre" cinsine çevir
-    driveConfig.encoder.positionConversionFactor(ModuleConstants.kDrivePositionFactor);
-    driveConfig.encoder.velocityConversionFactor(ModuleConstants.kDriveVelocityFactor);
+    // Motor devrini metreye çevir
+    driveConfig.encoder.positionConversionFactor(ModuleConstants.kDrivePositionFactor); // m/rot
+    driveConfig.encoder.velocityConversionFactor(ModuleConstants.kDriveVelocityFactor); // m/s per RPM
 
-    // Ayarları Motora Uygula (ResetMode: Fabrika ayarlarını sil, PersistMode:
-    // Kalıcı hafızaya yaz)
+    // PID kapalı döngü için hız kontrolü (PathPlanner bunu kullanabilir)
+    driveConfig.closedLoop.pid(0.04, 0.0, 0.0);         // Hız PID — ileride SysId ile tunelanacak
+    driveConfig.closedLoop.velocityFF(1.0 / (DriveConstants.kMaxSpeedMetersPerSecond * 60.0 /
+        ModuleConstants.kDrivePositionFactor)); // Basit feedforward
+
     m_driveMotor.configure(driveConfig, ResetMode.kResetSafeParameters, PersistMode.kPersistParameters);
 
-    // -------------------------------------------------------------------------
-    // DÖNÜŞ MOTORU KONFİGÜRASYONU (Turning Motor Config)
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // DÖNÜŞ MOTORU KONFİGÜRASYONU
+    // =========================================================================
     SparkMaxConfig turnConfig = new SparkMaxConfig();
 
     turnConfig.idleMode(IdleMode.kBrake);
-
-    // Voltaj Dengeleme
+    turnConfig.inverted(steerInverted);
     turnConfig.voltageCompensation(ModuleConstants.kNominalVoltage);
-
     turnConfig.smartCurrentLimit(ModuleConstants.kSteerCurrentLimit);
 
-    // Encoder Çevirimi: Motor devrini "Radyan" cinsine çevir
-    turnConfig.encoder.positionConversionFactor(ModuleConstants.kSteerPositionFactor);
-    turnConfig.encoder.velocityConversionFactor(ModuleConstants.kSteerVelocityFactor);
+    // Motor devrini radyana çevir
+    turnConfig.encoder.positionConversionFactor(ModuleConstants.kSteerPositionFactor); // rad/rot
+    turnConfig.encoder.velocityConversionFactor(ModuleConstants.kSteerVelocityFactor); // rad/s per RPM
 
-    // PID Ayarları: Tekerleğin hedef açıya titremeden gitmesi için
+    // PID
     turnConfig.closedLoop.pid(
         ModuleConstants.kTurningP,
         ModuleConstants.kTurningI,
         ModuleConstants.kTurningD);
 
-    // SÜREKLİ DÖNÜŞ (Position Wrapping) - ÇOK ÖNEMLİ!
-    // Tekerlek 359 dereceden 1 dereceye geçerken motoru geri sarmaz, 360'ı geçip
-    // devam eder.
-    // Giriş aralığı: 0 ile 2*Pi radyan arası.
+    // ✅ KRİTİK: Wrapping [-π, +π] — WPILib'in Rotation2d aralığıyla TAM UYUMLU.
+    //    Eski [0, 2π] aralığı negatif hedeflerde (strafe sağ = -π/2) hatalı
+    //    sonuç üretiyordu: motor kısa yol yerine 270° dönüyordu.
     turnConfig.closedLoop.positionWrappingEnabled(true);
-    turnConfig.closedLoop.positionWrappingInputRange(0, 2 * Math.PI);
+    turnConfig.closedLoop.positionWrappingInputRange(-Math.PI, Math.PI);
 
-    // Ayarları Motora Uygula
     m_turningMotor.configure(turnConfig, ResetMode.kResetSafeParameters, PersistMode.kPersistParameters);
 
-    // -------------------------------------------------------------------------
-    // NESNE BAĞLANTILARI
-    // -------------------------------------------------------------------------
-    // Ayarlar yapıldıktan sonra encoder ve PID nesnelerini alıyoruz.
-    m_driveEncoder = m_driveMotor.getEncoder();
-    m_turningEncoder = m_turningMotor.getEncoder();
+    // ── Nesne referansları ────────────────────────────────────────────────────
+    m_driveEncoder        = m_driveMotor.getEncoder();
+    m_turningEncoder      = m_turningMotor.getEncoder();
     m_turningPIDController = m_turningMotor.getClosedLoopController();
 
-    // Robot her açıldığında mutlak encoder (CANcoder) ile senkronize ol.
+    // ── İlk senkronizasyon ────────────────────────────────────────────────────
+    // CANcoder'ın hazır olmasını kısa süre bekle (CAN bus gecikmesi)
+    try { Thread.sleep(250); } catch (InterruptedException ignored) {}
     resetToAbsolute();
   }
 
-  /**
-   * Modül Durumu (Hız ve Açı) - Telemetri için
-   */
-  public SwerveModuleState getState() {
-    return new SwerveModuleState(m_driveEncoder.getVelocity(), new Rotation2d(m_turningEncoder.getPosition()));
-  }
+  // ===========================================================================
+  // MUTLAK ENCODER SENKRONİZASYONU
+  // ===========================================================================
 
   /**
-   * Modül Pozisyonu (Toplam Gidilen Yol ve Açı) - Odometry için
+   * SparkMax encoder'ını CANcoder'la senkronize eder.
+   * Robot her açıldığında çalışır.
+   *
+   * Formül: encoderRad = (cancoderRotations - offsetRotations) × 2π
+   *
+   * Sonuç [-π, π] aralığına normalize edilir (wrapping range ile uyumlu).
+   * Tekerlek ileri bakıyor iken encoder = 0 rad olur.
    */
-  public SwerveModulePosition getPosition() {
-    return new SwerveModulePosition(m_driveEncoder.getPosition(), new Rotation2d(m_turningEncoder.getPosition()));
+  public void resetToAbsolute() {
+    // Phoenix 6: getAbsolutePosition() → ROTASYON (-0.5 … 0.5)
+    double absoluteRotations = m_turningCanCoder.getAbsolutePosition().getValueAsDouble();
+
+    // Offset'i çıkar → tekerlek "ileri" iken sonuç 0 rotasyon olur
+    double positionRotations = absoluteRotations - m_chassisAngularOffsetRotations;
+
+    // Radyana çevir
+    double positionRad = positionRotations * 2.0 * Math.PI;
+
+    // [-π, π] aralığına normalize et (wrapping range ile uyumlu)
+    positionRad = normalizeAngle(positionRad);
+
+    m_turningEncoder.setPosition(positionRad);
   }
 
+  /** Açıyı [-π, π] aralığına getirir. */
+  private static double normalizeAngle(double angleRad) {
+    while (angleRad >  Math.PI) angleRad -= 2.0 * Math.PI;
+    while (angleRad < -Math.PI) angleRad += 2.0 * Math.PI;
+    return angleRad;
+  }
+
+  // ===========================================================================
+  // MODÜLE EMİR VERME
+  // ===========================================================================
+
   /**
-   * MODÜLE EMİR VERME (Kalbin Attığı Yer)
-   * 
-   * @param desiredState Hedeflenen hız ve açı
+   * Hedeflenen hız ve açıyı ayarla.
+   *
+   * @param desiredState WPILib'in hesapladığı hedef hız (m/s) ve açı (Rotation2d)
    */
   @SuppressWarnings("removal")
   public void setDesiredState(SwerveModuleState desiredState) {
-    // 1. Mevcut açıyı al (Optimizasyon hesabı için)
+    // Mevcut açı
     Rotation2d currentAngle = new Rotation2d(m_turningEncoder.getPosition());
 
-    // 2. OPTİMİZASYON (Tembel Robot Prensibi) - GÜNCELLENDİ (2026 Uyumlu)
-    // WPILib 2026: optimize() artık void döndürür ve desiredState'i yerinde
-    // değiştirir.
+    // OPTİMİZASYON: Tekerlek hedefine ≤90° ile ulaşabiliyorsa, uzun yola gitme.
+    // Eğer >90° dönmesi gerekiyorsa, motoru ters çevir + 180° döndür.
     desiredState.optimize(currentAngle);
 
-    // 3. Dönüş Motoruna PID ile Hedef Açıyı Ver - GÜNCELLENDİ (Slot Eklendi)
-    // REV artık Slot belirtmemizi istiyor (Varsayılan: Slot 0)
+    // Steer PID: hedef açıyı radyan olarak ver
+    // desiredState.angle.getRadians() her zaman [-π, π] aralığındadır → wrapping ile uyumlu ✓
     m_turningPIDController.setReference(
-        desiredState.angle.getRadians(), // Artık direkt desiredState kullanıyoruz
+        desiredState.angle.getRadians(),
         SparkMax.ControlType.kPosition,
         ClosedLoopSlot.kSlot0);
 
-    // 4. Sürüş Motoruna Açık Döngü (Open Loop) Hız Ver
-    // Hızı maksimum hıza bölerek -1 ile 1 arası bir değer buluyoruz.
+    // Drive motoru: open-loop hız kontrolü
+    // Normalize: [-1, 1] aralığına çevir
     m_driveMotor.set(desiredState.speedMetersPerSecond / DriveConstants.kMaxSpeedMetersPerSecond);
   }
 
-  // CANcoder'dan ofsetsiz ham değeri radyan olarak döndürür
-  public double getAbsolutePosition() {
-    return m_turningCanCoder.getAbsolutePosition().getValueAsDouble() * 2 * Math.PI;
+  // ===========================================================================
+  // DURUM / POZİSYON OKUMA
+  // ===========================================================================
+
+  /** Odometry için modül pozisyonu (toplam mesafe + açı). */
+  public SwerveModulePosition getPosition() {
+    return new SwerveModulePosition(
+        m_driveEncoder.getPosition(),
+        new Rotation2d(m_turningEncoder.getPosition()));
   }
 
-  // Akım limitini dinamik ayarlar
-  public void setDriveCurrentLimit(double amps) {
-    SparkMaxConfig config = new SparkMaxConfig();
-    config.smartCurrentLimit((int) amps);
-
-    // 2026'da kNoResetSafeParameters ve kNoPersistParameters kullanırken
-    // SparkMax hiyerarşisini kullanmaya özen göster
-m_driveMotor.configure(config, ResetMode.kNoResetSafeParameters,
-        PersistMode.kNoPersistParameters);
-  }
-
-  /**
-   * MUTLAK ENCODER SENKRONİZASYONU
-   * Robot elektriği kestiğinde Spark Max açısını unutur.
-   * CANcoder (Pilli/Hafızalı) gerçek açıyı bilir. Başlangıçta onu kopyalıyoruz.
-   */
-  public void resetToAbsolute() {
-    // CANcoder 0-1 arası değer verir, bunu Radyana (0-2Pi) çeviriyoruz.
-    double absolutePosition = m_turningCanCoder.getAbsolutePosition().getValueAsDouble() * 2 * Math.PI;
-
-    // Offseti (Kalibrasyon farkını) düşüyoruz.
-    absolutePosition -= m_chassisAngularOffset;
-
-    // Spark Max'ın beynine "Sen şu an buradasın" diyoruz.
-    m_turningEncoder.setPosition(absolutePosition);
+  /** Telemetri için modül durumu (anlık hız + açı). */
+  public SwerveModuleState getState() {
+    return new SwerveModuleState(
+        m_driveEncoder.getVelocity(),
+        new Rotation2d(m_turningEncoder.getPosition()));
   }
 
   /**
-   * Sürüş motorunun sıcaklığını döndürür.
-   * 
-   * @return Santigrat derece cinsinden sıcaklık.
+   * CANcoder'ın ham (offset uygulanmamış) mutlak pozisyonu.
+   * Dönüş: ROTASYON (-0.5 … 0.5) — offset kalibrasyon için kullanılır.
    */
+  public double getAbsolutePositionRotations() {
+    return m_turningCanCoder.getAbsolutePosition().getValueAsDouble();
+  }
+
+  // ===========================================================================
+  // YARDIMCI
+  // ===========================================================================
+
+  /** Drive motorunun anlık sıcaklığı (°C). */
   public double getTemp() {
-    // Sürüş motoru SparkMax olduğu için motorun sıcaklığını çekiyoruz
     return m_driveMotor.getMotorTemperature();
   }
 
-  // Acil Durum Freni
+  /** Drive akım limitini dinamik olarak günceller (brownout koruması). */
+  public void setDriveCurrentLimit(int amps) {
+    SparkMaxConfig config = new SparkMaxConfig();
+    config.smartCurrentLimit(amps);
+    m_driveMotor.configure(config,
+        ResetMode.kNoResetSafeParameters,
+        PersistMode.kNoPersistParameters);
+  }
+
+  /** Acil durdurma. */
   public void stop() {
     m_driveMotor.set(0);
     m_turningMotor.set(0);
