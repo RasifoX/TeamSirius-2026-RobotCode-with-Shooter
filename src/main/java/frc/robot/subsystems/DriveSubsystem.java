@@ -80,6 +80,13 @@ public class DriveSubsystem extends SubsystemBase {
   private final SwerveDriveOdometry m_odometry;
 
   // ===========================================================================
+  // AKIMM LİMİT CACHE — KRİTİK FIX
+  // Her 20ms'de configure() göndermemek için son değeri sakla.
+  // Sadece eşik geçildiğinde (30↔50) CAN frame gönderilir.
+  // ===========================================================================
+  private int m_lastCurrentLimit = -1;
+
+  // ===========================================================================
   // CONSTRUCTOR
   // ===========================================================================
 
@@ -144,16 +151,18 @@ public class DriveSubsystem extends SubsystemBase {
     // Dashboard
     updateDashboard();
 
-    // Dinamik akım koruması: Pil 10.5V altına düşerse drive akımını kıs
+    // Dinamik akım koruması: Pil 10.5V altına düşerse drive akımını kıs.
+    // FIX: Cache sayesinde configure() sadece eşik değiştiğinde çağrılır,
+    //      her 20ms'de değil. CAN bus spam önlendi.
     int currentLimit = RobotController.getBatteryVoltage() < 10.5 ? 30 : 50;
     updateDriveCurrentLimits(currentLimit);
   }
 
   private void updateDashboard() {
-    SmartDashboard.putBoolean("Cockpit/Gyro OK",      m_gyroIO.isConnected());
+    SmartDashboard.putBoolean("Cockpit/Gyro OK",       m_gyroIO.isConnected());
     SmartDashboard.putBoolean("Cockpit/DriveStick OK", DriverStation.isJoystickConnected(0));
-    SmartDashboard.putNumber("Cockpit/Heading deg",   getHeading());
-    SmartDashboard.putNumber("Cockpit/Max Temp C",    getMaxModuleTemp());
+    SmartDashboard.putNumber("Cockpit/Heading deg",    getHeading());
+    SmartDashboard.putNumber("Cockpit/Max Temp C",     getMaxModuleTemp());
 
     // Offset debug: konsol/shuffleboard'da görmek için
     SmartDashboard.putNumber("CANcoder/FL rot", m_frontLeft.getAbsolutePositionRotations());
@@ -294,11 +303,19 @@ public class DriveSubsystem extends SubsystemBase {
     };
   }
 
+  /**
+   * Akım limitini günceller.
+   * FIX: m_lastCurrentLimit cache sayesinde configure() sadece değer
+   *      değiştiğinde gönderilir. Her 20ms'de CAN spam olmaz.
+   */
   private void updateDriveCurrentLimits(int amps) {
+    if (amps == m_lastCurrentLimit) return;
+    m_lastCurrentLimit = amps;
     m_frontLeft.setDriveCurrentLimit(amps);
     m_frontRight.setDriveCurrentLimit(amps);
     m_rearLeft.setDriveCurrentLimit(amps);
     m_rearRight.setDriveCurrentLimit(amps);
+    System.out.println("[AKIM LİMİT] " + amps + "A olarak güncellendi.");
   }
 
   private double getMaxModuleTemp() {

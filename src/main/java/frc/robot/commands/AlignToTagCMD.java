@@ -3,76 +3,118 @@ package frc.robot.commands;
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.math.controller.PIDController;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import frc.robot.Constants.LimelightConstants;
 import frc.robot.subsystems.DriveSubsystem;
 import frc.robot.subsystems.LimelightSubsystem;
 
+/**
+ * AlignToTagCMD — HUB AprilTag Hizalama
+ *
+ * Basılı tutulduğu sürece Limelight'tan TX ve TY alarak robotu
+ * Hub'a hizalar. Heading lock YAPILMAZ — Hub sahada sabit olduğu için
+ * sadece TX=0, TY=setpoint yeterlidir.
+ *
+ * Koordinat mantığı:
+ *   TX pozitif → hedef robotun sağında → robotu sağa (negatif Y) kayar
+ *   TY pozitif → hedef yukarıda (robot yakın) → robot geri çekilir
+ *   TY negatif → hedef aşağıda (robot uzak) → robot ileri gider
+ */
 public class AlignToTagCMD extends Command {
-    private final DriveSubsystem driveSubsystem;
-    private final LimelightSubsystem limelightSubsystem;
 
-    private final PIDController xController; // İleri/Geri (TY'den beslenir)
-    private final PIDController yController; // Sağ/Sol (TX'ten beslenir)
-    private final PIDController thetaController; // Dönüş (Heading'den beslenir)
+    private final DriveSubsystem     m_drive;
+    private final LimelightSubsystem m_limelight;
 
-    public AlignToTagCMD(DriveSubsystem driveSubsystem, LimelightSubsystem limelightSubsystem) {
-        this.driveSubsystem = driveSubsystem;
-        this.limelightSubsystem = limelightSubsystem;
+    private final PIDController m_xController; // İleri/Geri — TY'den beslenir
+    private final PIDController m_yController; // Sağ/Sol   — TX'ten beslenir
 
-        this.xController = new PIDController(LimelightConstants.kP_X, LimelightConstants.kI_X, LimelightConstants.kD_X);
-        this.yController = new PIDController(LimelightConstants.kP_Y, LimelightConstants.kI_Y, LimelightConstants.kD_Y);
-        this.thetaController = new PIDController(LimelightConstants.kP_Theta, LimelightConstants.kI_Theta, LimelightConstants.kD_Theta);
+    public AlignToTagCMD(DriveSubsystem drive, LimelightSubsystem limelight) {
+        this.m_drive     = drive;
+        this.m_limelight = limelight;
 
-        this.thetaController.enableContinuousInput(-180, 180);
+        m_xController = new PIDController(
+            LimelightConstants.kP_X,
+            LimelightConstants.kI_X,
+            LimelightConstants.kD_X);
 
-        addRequirements(driveSubsystem); // Drive sistemini meşgul eder
+        m_yController = new PIDController(
+            LimelightConstants.kP_Y,
+            LimelightConstants.kI_Y,
+            LimelightConstants.kD_Y);
+
+        // Heading PID kaldırıldı — Hub için heading lock gerekmez.
+        // Hub sahada sabit, TX+TY hizalaması yeterli.
+
+        addRequirements(m_drive);
+    }
+
+    @Override
+    public void initialize() {
+        m_xController.reset();
+        m_yController.reset();
     }
 
     @Override
     public void execute() {
-        // Hedef yoksa zımba gibi dur
-        if (!limelightSubsystem.hasTarget()) {
-            driveSubsystem.driveRobotRelative(new ChassisSpeeds(0, 0, 0));
+        // Hedef görünmüyorsa dur
+        if (!m_limelight.hasTarget()) {
+            m_drive.driveRobotRelative(new ChassisSpeeds(0, 0, 0));
+            SmartDashboard.putString("Align/Durum", "Hedef YOK");
             return;
         }
 
-        // Verileri Çek
-        int id = limelightSubsystem.getTagID();
-        double tx = limelightSubsystem.getTX(); 
-        double ty = limelightSubsystem.getTY(); 
-        double currentHeading = driveSubsystem.getHeading();
+        int    id = m_limelight.getTagID();
+        double tx = m_limelight.getTX();
+        double ty = m_limelight.getTY();
 
-        // Hedef Açıyı Belirle
-        double targetHeading = currentHeading;
-        if (LimelightConstants.k180DegreeIDs.contains(id)) {
-            targetHeading = 180;
-        } else if (LimelightConstants.kZeroDegreeIDs.contains(id)) {
-            targetHeading = 0;
+        // Sadece Hub tag'lerine tepki ver
+        // Yanlış tag'e kilitlenmemek için kontrol et
+        if (!LimelightConstants.kHubIDs.contains(id) && id != -1) {
+            // -1 = ID henüz okunmadı, o durumda yine de hizalamayı dene
+            // Bilinen başka element tag'i ise dur
+            m_drive.driveRobotRelative(new ChassisSpeeds(0, 0, 0));
+            SmartDashboard.putString("Align/Durum", "Hub Tag Degil: " + id);
+            return;
         }
 
-        // PID Hesaplamaları
-        double rawXSpeed = xController.calculate(ty, LimelightConstants.TARGET_TY_SETPOINT);
-        double rawYSpeed = yController.calculate(tx, LimelightConstants.TARGET_TX_SETPOINT);
-        double rawRotSpeed = thetaController.calculate(currentHeading, targetHeading);
+        // PID hesaplamaları
+        // xController: TY → TARGET_TY_SETPOINT'e götür (ileri/geri)
+        // yController: TX → 0'a götür (sağ/sol)
+        double rawX = m_xController.calculate(ty, LimelightConstants.TARGET_TY_SETPOINT);
+        double rawY = m_yController.calculate(tx, LimelightConstants.TARGET_TX_SETPOINT);
 
-        // Paranoyakça Limit (Clamp)
-        double clampedXSpeed = MathUtil.clamp(rawXSpeed, -LimelightConstants.maxForwardSpeed, LimelightConstants.maxForwardSpeed);
-        double clampedYSpeed = MathUtil.clamp(rawYSpeed, -LimelightConstants.maxStrafeSpeed, LimelightConstants.maxStrafeSpeed);
-        double clampedRotSpeed = MathUtil.clamp(rawRotSpeed, -LimelightConstants.maxTurnSpeed, LimelightConstants.maxTurnSpeed);
+        // Hız limitleme
+        double xSpeed   = MathUtil.clamp(rawX, -LimelightConstants.maxForwardSpeed, LimelightConstants.maxForwardSpeed);
+        double ySpeed   = MathUtil.clamp(rawY, -LimelightConstants.maxStrafeSpeed,  LimelightConstants.maxStrafeSpeed);
 
-        // YÖN DÜZELTMELERİ (Koordinat Matrisi)
-        // Eğer robot ileri yerine geri, sağ yerine sola gidiyorsa buradaki eksi (-) işaretlerini değiştirt.
-        double finalXSpeed = clampedXSpeed;   // Ty pozitifse ileri git (yaklaş)
-        double finalYSpeed = -clampedYSpeed;  // Tx pozitifse (hedef sağda) sağa git
-        double finalRotSpeed = clampedRotSpeed;
+        // Yön düzeltmesi:
+        //   TY > setpoint → robot yakın → geri çekil (negatif X)
+        //   TX > 0        → hedef sağda → sola kayarak ortala (negatif Y)
+        // Eğer robot ters yönde gidiyorsa bu işaretleri değiştir.
+        double finalX = -xSpeed; // TY azaldıkça (hedef uzaklaştı) ileri git
+        double finalY = -ySpeed; // TX pozitifken (hedef sağda) sola kayarak ortala
 
-        // Drive (Robot Relative - Sahaya göre değil robota göre hizalama yaparız)
-        driveSubsystem.driveRobotRelative(new ChassisSpeeds(finalXSpeed, finalYSpeed, finalRotSpeed));
+        m_drive.driveRobotRelative(new ChassisSpeeds(finalX, finalY, 0)); // Heading yok
+
+        // Dashboard debug
+        SmartDashboard.putString("Align/Durum",  "HİZALANIYOR");
+        SmartDashboard.putNumber("Align/TagID",  id);
+        SmartDashboard.putNumber("Align/TX",     tx);
+        SmartDashboard.putNumber("Align/TY",     ty);
+        SmartDashboard.putNumber("Align/xHiz",   finalX);
+        SmartDashboard.putNumber("Align/yHiz",   finalY);
     }
 
     @Override
     public void end(boolean interrupted) {
-        driveSubsystem.driveRobotRelative(new ChassisSpeeds(0, 0, 0));
+        m_drive.driveRobotRelative(new ChassisSpeeds(0, 0, 0));
+        SmartDashboard.putString("Align/Durum", "Durdu");
+    }
+
+    @Override
+    public boolean isFinished() {
+        // Komut kendiliğinden bitmez, tuş bırakılınca biter (whileTrue)
+        return false;
     }
 }
