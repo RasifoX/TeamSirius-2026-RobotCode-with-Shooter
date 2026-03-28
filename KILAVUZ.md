@@ -6,12 +6,6 @@
 
 ## 📋 Değiştirilen Dosyalar (Deploy Edilecekler)
 
-| Dosya | Ne Değişti |
-|---|---|
-| `DriveSubsystem.java` | CAN bus spam fix — `m_lastCurrentLimit` cache eklendi |
-| `RobotContainer.java` | X butonu `ConditionalCommand`'a çevrildi, deprecated `schedule()` kaldırıldı |
-
-Diğer tüm dosyalar aynı. Sadece bu 2 dosyayı değiştir, deploy et.
 
 ---
 
@@ -263,5 +257,3 @@ src/main/java/frc/robot/
 ```
 
 ---
-
-*Bol şans yarın! 🤖*
